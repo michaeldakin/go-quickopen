@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -11,122 +13,149 @@ import (
 	"sync"
 )
 
-var (
-	debug   = flag.Bool("d", false, "Enable debug logging")
-	version = flag.String("version", "version: 0.1", "v")
-)
+// define Debug flag as global variable
+var Debug = flag.Bool("d", false, "Enable debug mode")
 
-// example:  gqo ENG-665245, UT-1234
 func main() {
 	flag.Parse()
 
-	envLogPath := os.Getenv("HOME")
-	envLog := envLogPath + "/quickopen.log"
+	// Initialise new logger and set the default log to slog
+	Logger := logger()
+	slog.SetDefault(Logger)
 
-	logToFile, err := os.OpenFile(envLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		panic(err)
-	}
-	defer logToFile.Close()
-
-	handlerOpts := &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}
-
-	logger := slog.New(slog.NewJSONHandler(logToFile, handlerOpts))
-	slog.SetDefault(logger)
-
-	if *debug {
-		logger.Warn("verbose debug logging is enabled")
-	}
-
+	// Get user args, len of args
 	userArgs := flag.Args()
-	lArgs := len(userArgs)
+	userArgsLen := len(userArgs)
 
-	var wg sync.WaitGroup
-	respchan := make(chan string, lArgs)
+	// Response channel for go routine responses
+	respchan := make(chan string, userArgsLen)
 
-	if lArgs >= 1 {
-		for i, arg := range userArgs {
-			if *debug {
-				logger.Debug(
-					"debug",
-					slog.Int("RANGE - arg", int(i)),
-					slog.String("%T", arg),
-					slog.String("msg", arg),
-				)
-			}
-			wg.Add(1)
-			go func(i int, arg string) {
-				defer wg.Done()
-				matchArgs(i, arg, respchan)
-				queue := <-respchan
-				logger.Info(
-					"test",
-					slog.Int("id", int(i)),
-					slog.String("result", queue),
-				)
-				openBrowser(queue)
-			}(i, arg)
+	// If the user input has 1 or more arg(s), rangeUserArgs() is called
+	// If userArgsLen is 0, getUserInput() is called
+	if userArgsLen >= 1 {
+		if *Debug {
+			slog.Debug("User args greater than 1, rangeUserArgs() called")
 		}
-		wg.Wait()
+		rangeUserArgsHandler(userArgs, respchan)
 	} else {
-		logger.Error("Use gqo <args>")
+		if *Debug {
+			slog.Debug("No args provided, getUserInput() called")
+		}
+		consoleArgs := getUserInput()
+		rangeUserArgsHandler(consoleArgs, respchan)
 	}
 }
 
-func matchArgs(i int, arg string, res chan string) {
-	if *debug {
-		fmt.Printf("goroutine[%d] : %s\n", i, arg)
+// Get user input from console, maximum of one line and break with <CR>, split the string at " " and append to a new slice
+func getUserInput() []string {
+	var consoleArgs []string
+
+	fmt.Print("Enter search term: ")
+	reader := bufio.NewReader(os.Stdin)
+
+	consoleInput, err := reader.ReadString('\r')
+	for {
+		if err != nil {
+			fmt.Println("Error reading input:", err)
+		}
+		if strings.HasSuffix(consoleInput, `\r`) {
+			consoleInput = strings.TrimSuffix(consoleInput, "\r")
+			consoleArgs = append(consoleArgs, consoleInput)
+			break
+		}
+		continue
 	}
 
+	if *Debug {
+		fmt.Println("Items entered:", consoleArgs)
+	}
+
+	return consoleArgs
+}
+
+func rangeUserArgsHandler(userArgs []string, msg chan string) {
+	var wg sync.WaitGroup
+	// make a var queue to store the return channel msg
+	var queue string
+
+	slog.Debug("rangeUserArgs", slog.String("userArgs", strings.Join(userArgs, " ")))
+	for i, arg := range userArgs {
+		wg.Add(1)
+		go func(i int, arg string) {
+			defer wg.Done()
+			slog.Debug("rangeUserArgs", slog.Int("i", i), slog.String("arg", arg))
+			matchUserArgsHandler(i, arg, msg)
+			// get return value from matchUserArgs
+		}(i, arg)
+		// print the output of the returned goroutine values
+		queue = <-msg
+		fmt.Println(queue)
+		openBrowser(queue)
+		// slog.Debug(queue)
+		wg.Wait()
+	}
+}
+
+func matchUserArgsHandler(i int, arg string, res chan string) {
 	var (
 		kb_url   string = "https://portal.nutanix.com/kb/"
 		jira_url string = "https://jira.nutanix.com/browse/"
 		jql_url  string = "https://jira.nutanix.com/secure/QuickSearch.jspa?searchString="
 	)
 
-	searchItem := strings.ToUpper(arg)
 	searchSplit := strings.Split(arg, "-")
-	searchPrefix := strings.ToUpper(searchSplit[0])
+	searchItem := strings.ToUpper(arg)
 
-	if strings.HasPrefix(searchPrefix, "KB") {
-		if *debug {
-			fmt.Printf("[%d] MATCHES KB : %v\n", i, searchItem)
-		}
+	// Check if the user arg "begins with"
+	prefix := func(matchAgainst, userMatch string) bool {
+		return strings.HasPrefix(matchAgainst, userMatch)
+	}
+
+	slog.Debug("matchUserArgs", slog.String("searchItem", searchItem))
+
+	if prefix(searchItem, "KB") {
+		slog.Debug("Matches KB", slog.Int("i", i), slog.String("searchItem", searchItem))
 		url_concat := kb_url + searchSplit[1]
 		res <- url_concat
-	} else if strings.HasPrefix(searchPrefix, "ENG") || strings.HasPrefix(searchPrefix, "ONCALL") || strings.HasPrefix(searchPrefix, "UT") {
-		if *debug {
-			fmt.Printf("[%d] MATCHES JIRA : %v\n", i, searchItem)
-		}
+	} else if prefix(searchItem, "ENG") || prefix(searchItem, "ONCALL") || prefix(searchItem, "TH") || prefix(searchItem, "UT") {
+		slog.Debug("Matches JIRA", slog.Int("i", i), slog.String("searchItem", searchItem))
 		url_concat := jira_url + searchItem
 		res <- url_concat
 	} else {
-		if *debug {
-			fmt.Printf("[%d] NO MATCH, SEARCHING JIRA : %v\n", i, searchItem)
-		}
-		jql_text := `text ~ "`
-		jql_orderBy := `" ORDER BY created DESC`
-		url_concat := jql_url + jql_text + arg + jql_orderBy
+		var url_concat string = jql_url + `text ~ "` + arg + "\""
 		res <- url_concat
+		slog.Debug("No match, searching JIRA", slog.Int("i", i), slog.String("searchItem", searchItem))
 	}
 }
 
+// openBrowser
+//   - Open the browser (if debug is not enabled)
 func openBrowser(url string) {
-	if !*debug {
-		var err error
+	var err error
+	if !*Debug {
 		switch runtime.GOOS {
 		case "darwin":
-			err = exec.Command("open", url).Start()
+			err := exec.Command("open", url).Start()
+			if err != nil {
+				log.Fatal(err)
+			}
 		case "linux":
-			err = exec.Command("xdg-open", url).Start()
-		case "windows":
+			err := exec.Command("xdg-open", url).Start()
+			if err != nil {
+				log.Fatal(err)
+			}
+		case "windows": // windows lol?
 			err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+			if err != nil {
+				log.Fatal(err)
+			}
 		default:
 			err = fmt.Errorf("error with runtime.GOOS: %v", err)
+			if err != nil {
+				log.Fatal(err)
+			}
 		}
 	} else {
-		fmt.Println("Not opening link due to debug mode")
+		fmt.Println("Not opening browser in debug mode")
 	}
 }
