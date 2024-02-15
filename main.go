@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -20,7 +21,7 @@ func main() {
 	flag.Parse()
 
 	// Initialise new logger and set the default log to slog
-	Logger := logger()
+	Logger := NewLogger()
 	slog.SetDefault(Logger)
 
 	// Get user args, len of args
@@ -30,7 +31,7 @@ func main() {
 	// Response channel for go routine responses
 	respchan := make(chan string, userArgsLen)
 
-	// If the user input has 1 or more arg(s), rangeUserArgs() is called
+	// If the user input has 1 or more arg(s), rangeUserArgsHandler() is called
 	// If userArgsLen is 0, getUserInput() is called
 	if userArgsLen >= 1 {
 		if *Debug {
@@ -44,6 +45,9 @@ func main() {
 		consoleArgs := getUserInput()
 		rangeUserArgsHandler(consoleArgs, respchan)
 	}
+
+	//
+	slog.Info("Finished?")
 }
 
 // Get user input from console, maximum of one line and break with <CR>, split the string at " " and append to a new slice
@@ -52,14 +56,14 @@ func getUserInput() []string {
 
 	fmt.Print("Enter search term: ")
 	reader := bufio.NewReader(os.Stdin)
-
 	consoleInput, err := reader.ReadString('\r')
 	for {
 		if err != nil {
 			fmt.Println("Error reading input:", err)
 		}
-		if strings.HasSuffix(consoleInput, `\r`) {
-			consoleInput = strings.TrimSuffix(consoleInput, "\r")
+		if strings.HasSuffix(consoleInput, "\r") || strings.HasSuffix(consoleInput, "\n") {
+			strings.TrimSuffix(consoleInput, "\r")
+			strings.TrimSuffix(consoleInput, "\n")
 			consoleArgs = append(consoleArgs, consoleInput)
 			break
 		}
@@ -73,23 +77,34 @@ func getUserInput() []string {
 	return consoleArgs
 }
 
-func rangeUserArgsHandler(userArgs []string, msg chan string) {
+type DebugRangeOverInfo struct {
+	i          int
+	searchItem string
+}
+
+func (d DebugRangeOverInfo) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Int("i", d.i),
+		slog.String("searchItem", d.searchItem))
+}
+
+// rangeUserArgsHandler(userArgs, respchan)
+func (d DebugRangeOverInfo) rangeUserArgsHandler(userArgs []string, msg chan string) {
 	var wg sync.WaitGroup
 	// make a var queue to store the return channel msg
 	var queue string
 
-	slog.Debug("rangeUserArgs", slog.String("userArgs", strings.Join(userArgs, " ")))
+	// slog.Debug("rangeUserArgs", slog.String("userArgs", strings.Join(userArgs, " ")))
 	for i, arg := range userArgs {
+		debugMatchUserArgsHandler := DebugRangeOverInfo{i, arg}
+		slog.Debug("rangeUserArgs", "debug", debugMatchUserArgsHandler)
 		wg.Add(1)
 		go func(i int, arg string) {
 			defer wg.Done()
-			slog.Debug("rangeUserArgs", slog.Int("i", i), slog.String("arg", arg))
 			matchUserArgsHandler(i, arg, msg)
-			// get return value from matchUserArgs
 		}(i, arg)
 		// print the output of the returned goroutine values
 		queue = <-msg
-		fmt.Println(queue)
 		openBrowser(queue)
 		// slog.Debug(queue)
 		wg.Wait()
@@ -97,34 +112,38 @@ func rangeUserArgsHandler(userArgs []string, msg chan string) {
 }
 
 func matchUserArgsHandler(i int, arg string, res chan string) {
+	debugMatchUserArgsHandler := DebugRangeOverInfo{i, arg}
 	var (
 		kb_url   string = "https://portal.nutanix.com/kb/"
 		jira_url string = "https://jira.nutanix.com/browse/"
 		jql_url  string = "https://jira.nutanix.com/secure/QuickSearch.jspa?searchString="
 	)
 
-	searchSplit := strings.Split(arg, "-")
-	searchItem := strings.ToUpper(arg)
-
 	// Check if the user arg "begins with"
 	prefix := func(matchAgainst, userMatch string) bool {
 		return strings.HasPrefix(matchAgainst, userMatch)
 	}
 
-	slog.Debug("matchUserArgs", slog.String("searchItem", searchItem))
+	searchSplit := strings.Split(arg, "-")
+	searchItem := strings.ToUpper(arg)
 
-	if prefix(searchItem, "KB") {
-		slog.Debug("Matches KB", slog.Int("i", i), slog.String("searchItem", searchItem))
-		url_concat := kb_url + searchSplit[1]
-		res <- url_concat
-	} else if prefix(searchItem, "ENG") || prefix(searchItem, "ONCALL") || prefix(searchItem, "TH") || prefix(searchItem, "UT") {
-		slog.Debug("Matches JIRA", slog.Int("i", i), slog.String("searchItem", searchItem))
-		url_concat := jira_url + searchItem
-		res <- url_concat
+	// check if split searchSplit is all numbers
+	re, err := regexp.Compile(`\d+`)
+
+	if re {
+		if prefix(searchItem, "KB") {
+			slog.Debug("Matches KB", "debug", debugMatchUserArgsHandler)
+			url_concat := kb_url + searchSplit[1]
+			res <- url_concat
+		} else if prefix(searchItem, "ENG") || prefix(searchItem, "ONCALL") || prefix(searchItem, "TH") || prefix(searchItem, "UT") {
+			slog.Debug("Matches JIRA", "debug", debugMatchUserArgsHandler)
+			url_concat := jira_url + searchItem
+			res <- url_concat
+		}
 	} else {
 		var url_concat string = jql_url + `text ~ "` + arg + "\""
 		res <- url_concat
-		slog.Debug("No match, searching JIRA", slog.Int("i", i), slog.String("searchItem", searchItem))
+		slog.Debug("No match, searching JIRA", "debug", debugMatchUserArgsHandler)
 	}
 }
 
@@ -156,6 +175,6 @@ func openBrowser(url string) {
 			}
 		}
 	} else {
-		fmt.Println("Not opening browser in debug mode")
+		slog.Debug("Not opening browser in debug mode")
 	}
 }
